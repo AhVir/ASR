@@ -247,7 +247,7 @@ def main():
     training_args = TrainingArguments(
         output_dir="./results_lora",
         overwrite_output_dir=True,
-        evaluation_strategy="epoch",
+        eval_strateg="epoch",
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         num_train_epochs=10,
@@ -299,3 +299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
