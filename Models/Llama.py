@@ -1,5 +1,6 @@
 import re
 import torch
+import os
 from typing import List, Dict
 from datasets import load_dataset
 from transformers import (
@@ -268,6 +269,19 @@ def main():
     debug_supervision(tokenized_val, "val")
 
     # 6) Train
+    # print("Setting up Trainer...")
+    # trainer = Trainer(
+    #     model=model,
+    #     args=training_args,
+    #     train_dataset=tokenized_train,
+    #     eval_dataset=tokenized_val,
+    #     data_collator=collator,
+    #     tokenizer=tokenizer,
+    # )
+
+    # print("Starting training...")
+    # trainer.train()
+
     print("Setting up Trainer...")
     trainer = Trainer(
         model=model,
@@ -278,8 +292,32 @@ def main():
         tokenizer=tokenizer,
     )
 
-    print("Starting training...")
-    trainer.train()
+    # Direct path to your checkpoint
+    checkpoint_path = "/content/VALLR/results_lora/checkpoint-5500"
+
+    if os.path.exists(checkpoint_path):
+        print(f"✅ Found checkpoint at: {checkpoint_path}")
+        
+        # Check if it's valid
+        required_files = ["trainer_state.json", "adapter_model.safetensors"]
+        missing_files = []
+        for file in required_files:
+            if not os.path.exists(os.path.join(checkpoint_path, file)):
+                missing_files.append(file)
+        
+        if missing_files:
+            print(f"⚠️ Missing files: {missing_files}")
+            print("⚠️ Will start fresh training instead")
+            resume_checkpoint = None
+        else:
+            resume_checkpoint = checkpoint_path
+            print(f"✅ Checkpoint is valid, resuming from step 5500")
+    else:
+        print("ℹ️ Checkpoint not found, starting fresh")
+        resume_checkpoint = None
+
+    print("\nStarting training...")
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     # 7) Save adapters (default) + tokenizer
     print("Saving the LoRA adapters...")
@@ -299,5 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
