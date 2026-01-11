@@ -154,36 +154,35 @@ def debug_supervision(ds, name):
             cnt += 1
     print(f"[{name}] examples with at least 1 supervised token: {cnt}/{n}")
 
-# ---------- Custom GPU-optimized collator ----------
+# ---------- SIMPLIFIED collator ----------
 
-class GPUCausalLMDataCollator(DataCollatorWithPadding):
+class SimpleCausalLMDataCollator(DataCollatorWithPadding):
     """
-    Uses tokenizer padding for inputs. Expects 'labels' already provided;
-    pads labels with -100 to match input length.
-    Automatically moves data to GPU.
+    Simplified collator that works with the dataset format.
     """
     def __call__(self, features):
-        labels = [f["labels"] for f in features]
-        for f in features:
-            f.pop("labels")
+        # Extract labels
+        labels = [f.pop("labels") for f in features] if "labels" in features[0] else None
+        
+        # Pad the rest
         batch = super().__call__(features)
-
-        max_len = batch["input_ids"].shape[1]
-        padded = []
-        for lab in labels:
-            if len(lab) < max_len:
-                lab = lab + [-100] * (max_len - len(lab))
-            else:
-                lab = lab[:max_len]
-            padded.append(lab)
         
-        batch["labels"] = torch.tensor(padded, dtype=torch.long)
-        
-        # Move all tensors to GPU if available
-        if torch.cuda.is_available():
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].cuda()
+        # Pad labels if they exist
+        if labels is not None:
+            # Find max length
+            max_len = batch["input_ids"].shape[1]
+            
+            # Pad labels
+            padded_labels = []
+            for lab in labels:
+                if len(lab) < max_len:
+                    padded = lab + [-100] * (max_len - len(lab))
+                else:
+                    padded = lab[:max_len]
+                padded_labels.append(padded)
+            
+            # Convert to tensor
+            batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
         
         return batch
 
@@ -242,25 +241,18 @@ def main():
     tok_fn = make_tokenize_fn(tokenizer, max_length=512)
     tokenized_train = train_ds.map(tok_fn, batched=True, remove_columns=train_ds.column_names)
     tokenized_val   = val_ds.map(tok_fn,   batched=True, remove_columns=val_ds.column_names)
-    
-    # Set format for PyTorch (optimization)
-    tokenized_train.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-    tokenized_val.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
 
-    # 4) Load base model with GPU optimization
+    # 4) Load base model with FIXED gradient settings
     print("Loading base model...")
     
-    # Force model to GPU with explicit device placement
+    # Load model with gradient computation enabled
     model = AutoModelForCausalLM.from_pretrained(
         model_id, 
         torch_dtype=torch.float16,
-        device_map="cuda:0" if torch.cuda.is_available() else "cpu"
+        device_map="cuda:0" if torch.cuda.is_available() else "cpu",
+        use_cache=False  # IMPORTANT: Disable cache for gradient checkpointing
     )
     
-    # Alternative: Manual GPU placement (more explicit)
-    # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)
-    # model = model.to(device)
-
     if added > 0:
         model.resize_token_embeddings(len(tokenizer))
 
@@ -279,8 +271,8 @@ def main():
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
-    # 5) GPU-optimized collator & training args
-    collator = GPUCausalLMDataCollator(tokenizer=tokenizer)
+    # 5) Use the simplified collator
+    collator = SimpleCausalLMDataCollator(tokenizer=tokenizer)
 
     print("\nSetting up training arguments...")
     training_args = TrainingArguments(
@@ -293,29 +285,29 @@ def main():
         save_total_limit=3,  # Keep last 3 checkpoints
         
         # GPU optimization settings
-        per_device_train_batch_size=2,  # Increased from 1
+        per_device_train_batch_size=1,  # Start with 1 to ensure it works
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=2,  # Reduced from 4
+        gradient_accumulation_steps=4,  # Increase this instead
         num_train_epochs=3,  # Reduced for Colab time limits
         
         learning_rate=2e-4,
         weight_decay=0.01,
         logging_dir='./logs',
-        logging_steps=50,
+        logging_steps=10,  # More frequent logging
         fp16=True,  # Mixed precision training
         warmup_ratio=0.03,
         report_to="none",
         
         # Data loading optimizations
-        dataloader_num_workers=2,  # Parallel data loading
-        dataloader_pin_memory=True,  # Faster data transfer to GPU
+        dataloader_num_workers=0,  # Set to 0 for now to avoid issues
+        dataloader_pin_memory=True if torch.cuda.is_available() else False,
         remove_unused_columns=False,  # Important for custom datasets
         
-        # Memory optimization
-        gradient_checkpointing=True,  # Trade compute for memory
+        # Memory optimization - DISABLE gradient checkpointing for now
+        gradient_checkpointing=False,  # Disable to fix the gradient issue
         
         # Optional: Early stopping
-        load_best_model_at_end=False,  # Set to True if using eval
+        load_best_model_at_end=False,
         metric_for_best_model="loss",
         greater_is_better=False,
     )
@@ -324,6 +316,34 @@ def main():
     print(f"Tokenizer/model vocab: {len(tokenizer)}/{vocab}")
     debug_supervision(tokenized_train, "train")
     debug_supervision(tokenized_val, "val")
+
+    # Verify model is trainable
+    print("\n" + "=" * 60)
+    print("MODEL TRAINABILITY CHECK")
+    print("=" * 60)
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable %: {(trainable_params/total_params)*100:.2f}%")
+    
+    # Quick test: Check if gradients will flow
+    print("\nTesting gradient flow...")
+    model.train()
+    sample = tokenized_train[0]
+    inputs = {
+        "input_ids": torch.tensor([sample["input_ids"]]).to(device),
+        "attention_mask": torch.tensor([sample["attention_mask"]]).to(device),
+        "labels": torch.tensor([sample["labels"]]).to(device)
+    }
+    
+    with torch.no_grad():  # Just test, don't actually compute
+        outputs = model(**inputs)
+        print(f"Loss: {outputs.loss.item() if outputs.loss is not None else 'N/A'}")
+    
+    # Check if LoRA adapters are properly configured
+    print(f"Model is training mode: {model.training}")
+    print("=" * 60)
 
     # 6) Train with GPU monitoring
     print("\nSetting up Trainer...")
@@ -352,7 +372,28 @@ def main():
         resume_from_checkpoint = checkpoints[-1]
         print(f"\nResuming from checkpoint: {resume_from_checkpoint}")
     
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    try:
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    except Exception as e:
+        print(f"\nError during training: {e}")
+        print("\nTroubleshooting steps:")
+        print("1. Check if LoRA adapters are properly attached")
+        print("2. Verify model is in training mode")
+        print("3. Check if gradients are enabled")
+        
+        # Try a simpler approach if training fails
+        print("\nTrying simpler training approach...")
+        training_args.gradient_accumulation_steps = 1
+        training_args.per_device_train_batch_size = 1
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_val,
+            data_collator=collator,
+            tokenizer=tokenizer,
+        )
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # 7) Save adapters
     print("\nSaving the LoRA adapters...")
