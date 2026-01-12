@@ -152,7 +152,7 @@ class VideoViTMasked(nn.Module):
 # VALLR model (pure PyTorch)
 # ============================
 
-class VALLR(nn.Module):
+class ML_VALLR(nn.Module):
     """
     VALLR with spatiotemporal ViT (tubelet embedding) + temporal Conv1d downsampling + adapter + CTC head.
 
