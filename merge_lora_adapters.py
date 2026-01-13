@@ -10,6 +10,9 @@ from peft import PeftModel
 import os
 import argparse
 
+# Special tokens that were added during training (from Models/Llama.py)
+SPECIAL_TAGS = ["<S2S>", "<PHONEMES>", "</PHONEMES>", "<TEXT>"]
+
 def merge_lora_adapters(
     base_model_id="meta-llama/Llama-3.2-3B-Instruct",
     adapter_path="./results_lora/checkpoint-10000",
@@ -35,6 +38,16 @@ def merge_lora_adapters(
         print(f"❌ Error: Adapter path not found: {adapter_path}")
         return False
     
+    # Step 1: Load tokenizer from the adapter checkpoint (has the special tokens)
+    print(f"\n📥 Loading tokenizer from adapter: {adapter_path}")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(adapter_path)
+        print(f"✓ Tokenizer loaded (vocab size: {len(tokenizer)})")
+    except Exception as e:
+        print(f"❌ Error loading tokenizer: {e}")
+        return False
+    
+    # Step 2: Load base model
     print(f"\n📥 Loading base model: {base_model_id}")
     try:
         base_model = AutoModelForCausalLM.from_pretrained(
@@ -42,23 +55,20 @@ def merge_lora_adapters(
             torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto" if device == "cuda" else None,
         )
-        print("✓ Base model loaded")
+        print(f"✓ Base model loaded (original vocab size: {base_model.config.vocab_size})")
     except Exception as e:
         print(f"❌ Error loading base model: {e}")
         print("\nTip: Make sure you're logged into Hugging Face:")
         print("  huggingface-cli login")
         return False
     
-    print(f"\n📥 Loading tokenizer from: {adapter_path}")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(adapter_path)
-        print("✓ Tokenizer loaded")
-    except Exception as e:
-        print(f"⚠ Warning: Could not load tokenizer from adapter path: {e}")
-        print(f"📥 Loading tokenizer from base model: {base_model_id}")
-        tokenizer = AutoTokenizer.from_pretrained(base_model_id)
-        print("✓ Tokenizer loaded from base model")
+    # Step 3: Resize embeddings to match the trained model
+    # The trained model had special tokens added, so we need to resize
+    print(f"\n🔧 Resizing model embeddings: {base_model.config.vocab_size} → {len(tokenizer)}")
+    base_model.resize_token_embeddings(len(tokenizer))
+    print(f"✓ Embeddings resized to {len(tokenizer)}")
     
+    # Step 4: Load LoRA adapters
     print(f"\n📥 Loading LoRA adapters from: {adapter_path}")
     try:
         model = PeftModel.from_pretrained(base_model, adapter_path)
@@ -67,6 +77,7 @@ def merge_lora_adapters(
         print(f"❌ Error loading LoRA adapters: {e}")
         return False
     
+    # Step 5: Merge LoRA weights into base model
     print("\n🔀 Merging LoRA weights into base model...")
     try:
         merged_model = model.merge_and_unload()
@@ -75,6 +86,7 @@ def merge_lora_adapters(
         print(f"❌ Error merging model: {e}")
         return False
     
+    # Step 6: Save the merged model
     print(f"\n💾 Saving merged model to: {output_path}")
     os.makedirs(output_path, exist_ok=True)
     
@@ -98,6 +110,8 @@ def merge_lora_adapters(
     print("="*60)
     print(f"📁 Output location: {output_path}")
     print(f"📦 Model size: {model_size:.2f} GB")
+    print(f"📝 Vocabulary size: {len(tokenizer)} tokens")
+    print(f"🏷️  Special tokens: {SPECIAL_TAGS}")
     print(f"\n🚀 Next step: Run inference with:")
     print(f"  export VALLR_LLM_PATH={output_path}")
     print(f"  python main.py --mode infer --version V1 \\")
