@@ -49,11 +49,11 @@ def text_to_phoneme_line(text: str) -> str:
     arpawords = text_to_arpabet_words(text)
     return " ".join(arpawords)
 
-# ---------- Data cleaning for BookCorpus ----------
+# ---------- Data cleaning for text ----------
 
-def clean_bookcorpus_text(text: str) -> str:
+def clean_text(text: str) -> str:
     """
-    Clean BookCorpus text by removing unwanted characters and formatting.
+    Clean text by removing unwanted characters and formatting.
     """
     if not text or not isinstance(text, str):
         return ""
@@ -64,15 +64,33 @@ def clean_bookcorpus_text(text: str) -> str:
     # Remove quotes that might cause issues
     text = text.replace('"', '').replace("'", "")
     
-    # Remove any remaining special characters (keep basic punctuation)
-    text = re.sub(r'[^\w\s.,!?\-]', '', text)
+    # Remove Wikipedia markup
+    text = re.sub(r'=+\s*[^=]+\s*=+', '', text)  # Section headers
+    text = re.sub(r'\[\d+\]', '', text)  # Citations [1], [2]
+    text = re.sub(r'\[citation needed\]', '', text, flags=re.IGNORECASE)
     
-    # Ensure it starts with a capital letter and ends with punctuation
-    text = text.strip()
-    if text and text[0].islower():
-        text = text[0].upper() + text[1:]
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
     
-    return text
+    # Remove parenthesized content (often references)
+    text = re.sub(r'\([^)]*\)', '', text)
+    
+    # Remove special markup
+    text = re.sub(r'{{.*?}}', '', text)  # Templates
+    text = re.sub(r'<.*?>', '', text)    # HTML tags
+    
+    # Remove any remaining non-alphabetic characters at start/end of lines
+    lines = text.split('\n')
+    clean_lines = []
+    for line in lines:
+        line = line.strip()
+        if line and re.search(r'[A-Za-z]', line) and len(line) > 3:
+            # Ensure it starts with capital letter for sentences
+            if line and line[0].islower():
+                line = line[0].upper() + line[1:]
+            clean_lines.append(line)
+    
+    return ' '.join(clean_lines)
 
 def filter_text_by_length(text: str, min_words: int = 3, max_words: int = 50) -> str:
     """
@@ -81,6 +99,12 @@ def filter_text_by_length(text: str, min_words: int = 3, max_words: int = 50) ->
     words = text.split()
     if len(words) < min_words or len(words) > max_words:
         return ""
+    
+    # Check if it's mostly English words
+    alpha_count = sum(1 for word in words if re.match(r'^[A-Za-z\'-]+$', word))
+    if alpha_count / len(words) < 0.7:  # At least 70% alphabetic
+        return ""
+    
     return text
 
 # ---------- Dataset building (phonemes -> text) ----------
@@ -92,7 +116,7 @@ def build_example(text: str) -> Dict[str, str]:
     Builds one training pair where the INPUT is phonemes and the TARGET is original text.
     """
     # Clean the text first
-    text = clean_bookcorpus_text(text)
+    text = clean_text(text)
     text = filter_text_by_length(text, min_words=3, max_words=50)
     
     text = (text or "").strip()
@@ -111,28 +135,42 @@ def build_example(text: str) -> Dict[str, str]:
     return {"prompt": prompt, "target": target, "full": full}
 
 def prepare_split(split: str):
-    # Load BookCorpus dataset
+    # Use TinyStories instead - cleaner, simpler text
     try:
-        base = load_dataset("bookcorpus", split=split)
+        print(f"Loading TinyStories dataset ({split})...")
+        if split == "validation":
+            split = "valid"  # TinyStories uses "valid" not "validation"
+        
+        base = load_dataset("roneneldan/TinyStories", split=split)
+        
+        # TinyStories has text in "text" field
+        if "text" not in base.column_names:
+            raise ValueError("TinyStories doesn't have 'text' field")
+            
+        print(f"Loaded {len(base)} examples from TinyStories")
+        
     except Exception as e:
-        print(f"Error loading bookcorpus: {e}")
+        print(f"Error loading TinyStories: {e}")
         print("Falling back to wikitext...")
+        # Fallback to wikitext
         base = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     
     # Filter out non-string or empty entries
     base = base.filter(lambda ex: isinstance(ex.get("text", ""), str) and len(ex["text"].strip()) > 0)
     
-    # Take a subset if needed (BookCorpus is large)
-    if split == "train" and len(base) > 50000:
-        base = base.select(range(50000))  # Limit to 50k for training
+    # Take a subset if needed for faster training
+    if split in ["train", "valid"] and len(base) > 50000:
+        print(f"Limiting {split} set to 50000 examples...")
+        base = base.select(range(50000))
     elif split == "validation" and len(base) > 5000:
-        base = base.select(range(5000))   # Limit to 5k for validation
+        print(f"Limiting validation set to 5000 examples...")
+        base = base.select(range(5000))
 
     def mapper(batch):
         # Apply cleaning to batch
         cleaned_texts = []
         for t in batch["text"]:
-            cleaned = clean_bookcorpus_text(t)
+            cleaned = clean_text(t)
             cleaned = filter_text_by_length(cleaned, min_words=3, max_words=50)
             if cleaned:
                 cleaned_texts.append(cleaned)
@@ -149,6 +187,7 @@ def prepare_split(split: str):
         }
 
     ds = base.map(mapper, batched=True, batch_size=1000, remove_columns=base.column_names)
+    print(f"After cleaning: {len(ds)} examples")
     return ds
 
 # ---------- Tokenization with prefix-masked labels ----------
