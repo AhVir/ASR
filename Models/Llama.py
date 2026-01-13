@@ -293,7 +293,7 @@ def main():
     )
 
     # Direct path to your checkpoint
-    checkpoint_path = "/content/VALLR/results_lora/checkpoint-5500"
+    checkpoint_path = "/content/VALLR/results_lora/checkpoint-10000"
 
     if os.path.exists(checkpoint_path):
         print(f"✅ Found checkpoint at: {checkpoint_path}")
@@ -337,4 +337,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
